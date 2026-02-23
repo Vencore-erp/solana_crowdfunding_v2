@@ -64,9 +64,6 @@ pub mod solana_crowdfunding {
         if clock.unix_timestamp < campaign.deadline {
             return err!(CrowdfundError::CampaignNotEnded);
         }
-        if campaign.claimed {
-            return err!(CrowdfundError::AlreadyClaimed);
-        }
 
         let vault_balance = vault.lamports();
 
@@ -89,8 +86,7 @@ pub mod solana_crowdfunding {
         
         system_program::transfer(cpi_context, vault_balance)?;
 
-        campaign.claimed = true;
-        msg!("Withdrawn all funds: {} lamports", vault_balance);
+        msg!("Withdrawn all funds: {} lamports. Campaign closed.", vault_balance);
         Ok(())
     }
 
@@ -134,6 +130,10 @@ pub mod solana_crowdfunding {
 
         campaign.raised = campaign.raised.checked_sub(amount).ok_or(CrowdfundError::Overflow)?;
         contribution.amount = contribution.amount.checked_sub(amount).ok_or(CrowdfundError::Overflow)?;
+
+        if contribution.amount == 0 {
+            ctx.accounts.contribution.close(donor.to_account_info())?;
+        }
 
         msg!("Refunded: {} lamports", amount);
         Ok(())
@@ -192,6 +192,7 @@ pub struct Contribute<'info> {
 pub struct Withdraw<'info> {
     #[account(
         mut,
+        close = creator,
         has_one = creator @ CrowdfundError::NotCreator
     )]
     pub campaign: Account<'info, Campaign>,
