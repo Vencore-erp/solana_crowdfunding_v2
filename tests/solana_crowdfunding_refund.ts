@@ -137,7 +137,7 @@ describe("solana_crowdfunding_refund_security", () => {
     it("7. Try refunding again -> should fail (contribution account missing)", async () => {
         try {
             await program.methods
-                .refund()
+                .refund() // no amount parameter passed, IDL doesn't even allow it
                 .accounts({
                     campaign: campaignPDA,
                     contribution: contributionPDA, // This is now closed
@@ -147,6 +147,42 @@ describe("solana_crowdfunding_refund_security", () => {
             assert.fail("Should have failed because contribution PDA is closed!");
         } catch (err) {
             // The error should be that the account doesn't exist
+            assert.include(err.toString(), "AccountNotInitialized");
+        }
+    });
+
+    it("8. Hacker tries to refund from a campaign without ever contributing (Drain attempt)", async () => {
+        // Generate a brand new fresh keypair that has never contributed
+        const hacker = anchor.web3.Keypair.generate();
+
+        // Airdrop some SOL to the hacker so they can pay for transaction fees
+        const airdropTx = await provider.connection.requestAirdrop(hacker.publicKey, 1000000 * 1e9);
+        const latestBlockHash = await provider.connection.getLatestBlockhash();
+        await provider.connection.confirmTransaction({
+            blockhash: latestBlockHash.blockhash,
+            lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
+            signature: airdropTx
+        });
+
+        // The hacker has to derive what THEIR contribution PDA would be
+        const [hackerContributionPDA] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("contribution"), campaignPDA.toBuffer(), hacker.publicKey.toBuffer()],
+            program.programId
+        );
+
+        try {
+            await program.methods
+                .refund()
+                .accounts({
+                    campaign: campaignPDA,
+                    contribution: hackerContributionPDA, // Hacker tries to submit their own empty PDA
+                    donor: hacker.publicKey,
+                })
+                .signers([hacker]) // Hacker signs
+                .rpc();
+            assert.fail("Hacker drain attempt should have failed!");
+        } catch (err) {
+            // Fails because their PDA was never initialized (they never contributed)
             assert.include(err.toString(), "AccountNotInitialized");
         }
     });
