@@ -23,7 +23,7 @@ pub mod solana_crowdfunding {
         campaign.claimed = false;
         campaign.bump = ctx.bumps.campaign;
 
-        msg!("Campaign created! Goal: {} lamports, Deadline: {}", goal, deadline);
+        msg!("Campaign created: goal={}, deadline={}", goal, deadline);
         Ok(())
     }
 
@@ -47,7 +47,7 @@ pub mod solana_crowdfunding {
         campaign.raised = campaign.raised.checked_add(amount).ok_or(CrowdfundError::Overflow)?;
         contribution.amount = contribution.amount.checked_add(amount).ok_or(CrowdfundError::Overflow)?;
         
-        msg!("Contributed: {} lamports. Total Raised: {}", amount, campaign.raised);
+        msg!("Contributed: {} lamports, total={}", amount, campaign.raised);
         Ok(())
     }
 
@@ -90,7 +90,7 @@ pub mod solana_crowdfunding {
 
         campaign.claimed = true;
 
-        msg!("Withdrawn all funds: {} lamports. Campaign closed.", vault_balance);
+        msg!("Withdrawn: {} lamports", vault_balance);
         Ok(())
     }
 
