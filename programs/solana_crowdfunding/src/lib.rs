@@ -11,9 +11,9 @@ pub mod solana_crowdfunding {
         let campaign = &mut ctx.accounts.campaign;
         let clock = Clock::get()?;
 
-        if deadline <= clock.unix_timestamp {
-            return err!(CrowdfundError::DeadlineInPast);
-        }
+        require!(deadline > clock.unix_timestamp, CrowdfundError::DeadlineInPast);
+        require!(name.as_bytes().len() <= 32, CrowdfundError::NameTooLong);
+        require!(goal > 0, CrowdfundError::InvalidGoal);
 
         campaign.creator = *ctx.accounts.creator.key;
         campaign.name = name;
@@ -32,9 +32,8 @@ pub mod solana_crowdfunding {
         let contribution = &mut ctx.accounts.contribution;
         let clock = Clock::get()?;
 
-        if clock.unix_timestamp >= campaign.deadline {
-            return err!(CrowdfundError::CampaignEnded);
-        }
+        require!(amount > 0, CrowdfundError::InvalidAmount);
+        require!(clock.unix_timestamp < campaign.deadline, CrowdfundError::CampaignEnded);
 
         let cpi_context = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
@@ -64,6 +63,9 @@ pub mod solana_crowdfunding {
         if clock.unix_timestamp < campaign.deadline {
             return err!(CrowdfundError::CampaignNotEnded);
         }
+        if campaign.claimed {
+            return err!(CrowdfundError::AlreadyClaimed);
+        }
 
         let vault_balance = vault.lamports();
 
@@ -86,11 +88,13 @@ pub mod solana_crowdfunding {
         
         system_program::transfer(cpi_context, vault_balance)?;
 
+        campaign.claimed = true;
+
         msg!("Withdrawn all funds: {} lamports. Campaign closed.", vault_balance);
         Ok(())
     }
 
-    pub fn refund(ctx: Context<Refund>, amount: u64) -> Result<()> {
+    pub fn refund(ctx: Context<Refund>) -> Result<()> {
         let campaign = &mut ctx.accounts.campaign;
         let contribution = &mut ctx.accounts.contribution;
         let donor = &mut ctx.accounts.donor;
@@ -101,13 +105,15 @@ pub mod solana_crowdfunding {
         if clock.unix_timestamp < campaign.deadline {
             return err!(CrowdfundError::CampaignNotEnded);
         }
+        if campaign.claimed {
+            return err!(CrowdfundError::AlreadyClaimed);
+        }
         if campaign.raised >= campaign.goal {
             return err!(CrowdfundError::GoalMetCannotRefund);
         }
         
-        if contribution.amount < amount {
-            return err!(CrowdfundError::InsufficientContribution);
-        }
+        let amount = contribution.amount;
+        require!(amount > 0, CrowdfundError::InsufficientContribution);
 
         let campaign_key = campaign.key();
         let seeds = &[
@@ -116,6 +122,16 @@ pub mod solana_crowdfunding {
             &[ctx.bumps.vault],
         ];
         let signer_seeds = &[&seeds[..]];
+
+        let vault_balance = vault.lamports();
+        
+        // Prevent rent-exemption griefing attack where an attacker sends a tiny amount of SOL to the vault 
+        // causing the last refund to fail because the remaining balance is not 0 but < minimum rent.
+        let transfer_amount = if campaign.raised == amount {
+            vault_balance
+        } else {
+            amount
+        };
 
         let cpi_context = CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
@@ -126,14 +142,10 @@ pub mod solana_crowdfunding {
             signer_seeds,
         );
 
-        system_program::transfer(cpi_context, amount)?;
+        system_program::transfer(cpi_context, transfer_amount)?;
 
         campaign.raised = campaign.raised.checked_sub(amount).ok_or(CrowdfundError::Overflow)?;
-        contribution.amount = contribution.amount.checked_sub(amount).ok_or(CrowdfundError::Overflow)?;
-
-        if contribution.amount == 0 {
-            ctx.accounts.contribution.close(donor.to_account_info())?;
-        }
+        // 'contribution' account is closed by anchor via #[account(close = donor)]
 
         msg!("Refunded: {} lamports", amount);
         Ok(())
@@ -192,7 +204,6 @@ pub struct Contribute<'info> {
 pub struct Withdraw<'info> {
     #[account(
         mut,
-        close = creator,
         has_one = creator @ CrowdfundError::NotCreator
     )]
     pub campaign: Account<'info, Campaign>,
@@ -213,6 +224,7 @@ pub struct Refund<'info> {
     pub campaign: Account<'info, Campaign>,
     #[account(
         mut,
+        close = donor,
         seeds = [b"contribution", campaign.key().as_ref(), donor.key().as_ref()],
         bump
     )]
@@ -264,4 +276,10 @@ pub enum CrowdfundError {
     Overflow,
     #[msg("Insufficient contribution amount.")]
     InsufficientContribution,
+    #[msg("Campaign name cannot exceed 32 bytes.")]
+    NameTooLong,
+    #[msg("Goal must be greater than zero.")]
+    InvalidGoal,
+    #[msg("Contribution amount must be greater than zero.")]
+    InvalidAmount,
 }
